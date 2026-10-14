@@ -98,6 +98,33 @@
   .snd .labels label.unheard { color: var(--muted); }
   .hide-unheard .snd .labels label.unheard { display: none; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  .chart {
+    margin: 14px 0 4px; padding: 12px 14px 8px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow); position: relative;
+  }
+  .chart .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .chart .head b { color: var(--text); font-size: 14px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; padding: 3px 10px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: var(--text); color: var(--bg); }
+  #chartSvg { display: block; width: 100%; height: 150px; margin-top: 8px; overflow: visible; }
+  #chartSvg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #chartSvg .grid { stroke: var(--line); }
+  #chartSvg .hit { fill: transparent; cursor: pointer; }
+  #chartSvg .hit:hover { fill: color-mix(in srgb, var(--text) 7%, transparent); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .tip {
+    position: absolute; z-index: 3; pointer-events: none; min-width: 170px; padding: 8px 10px; font-size: 12px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+  }
+  .tip[hidden] { display: none; }
+  .tip .t { font-weight: 600; margin-bottom: 4px; }
+  .tip div { display: flex; align-items: center; gap: 6px; }
+  .tip .v { margin-left: auto; padding-left: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .clip.flash { outline: 2px solid var(--accent); outline-offset: 2px; }
   .empty { text-align: center; color: var(--muted); padding: 60px 0; }
   @media (max-width: 520px) {
     .clip { grid-template-columns: 1fr; }
@@ -154,6 +181,19 @@
   </div>
 </header>
 <main class="wrap">
+  <section class="chart" id="chart">
+    <div class="head">
+      <b>Sounds over time</b>
+      <span id="chartSum"></span>
+      <span class="spacer"></span>
+      <span class="seg" id="range">
+        <button data-r="3h" class="on">3 hours</button><button data-r="24h">24 hours</button><button data-r="7d">7 days</button>
+      </span>
+    </div>
+    <svg id="chartSvg"></svg>
+    <div class="legend" id="legend"></div>
+    <div class="tip" id="tip" hidden></div>
+  </section>
   <div id="list" class="hide-nospeech"></div>
   <div id="empty" class="empty">Nothing heard yet. Say something.</div>
 </main>
@@ -300,7 +340,7 @@ async function del(id) {
 }
 
 async function pollClips() {
-  try { render(await (await fetch('/api/clips')).json()); } catch {}
+  try { render(await (await fetch('/api/clips')).json()); drawChart(); } catch {}
   setTimeout(pollClips, 1500);
 }
 
@@ -465,6 +505,138 @@ $('#q').oninput = () => {
   for (const { el } of cards.values()) { el.querySelector('.text').innerHTML = textHtml(el._clip); applyFilter(el); }
   updateCount();
 };
+
+// Sounds-over-time chart: minutes recorded per time bucket, stacked by the
+// group of each clip's strongest classifier label.
+const GROUP_COLORS = {
+  'Speech & voice': '#2f9e7f', 'Laughter & crying': '#e0a030', 'Body sounds': '#c97b63', 'Music': '#6c5ce7',
+  'Instruments': '#a29bfe', 'Animals': '#9c7a45', 'Household': '#4f8fc0', 'Appliances & machines': '#7f8c8d',
+  'Alarms, phones & signals': '#e05555', 'Vehicles & traffic': '#d17a22', 'Weather, water & nature': '#3fb0c9',
+  'Impacts & bangs': '#b0466e', 'Sports': '#9bbf3a', 'Silence': '#c4c2bb', 'Unclassified': '#8a8880',
+};
+const RANGES = {   // bucket size, bucket count, tick every n buckets
+  '3h': { step: 5 * 60e3, n: 36, tick: 6 },
+  '24h': { step: 30 * 60e3, n: 48, tick: 6 },
+  '7d': { step: 3 * 3600e3, n: 56, tick: 8 },
+};
+let range = '3h', labelGroup = null, chartSig = '', buckets = [];
+const hourFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+const wdayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+const tipFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+
+function clipGroup(c) {
+  const top = (c.labels || [])[0];
+  return top && labelGroup ? (labelGroup[top[0]] || 'Unclassified') : 'Unclassified';
+}
+function fmtMin(sec) { return sec < 60 ? `${Math.round(sec)}s` : `${(sec / 60).toFixed(sec < 600 ? 1 : 0)} min`; }
+
+function drawChart(force) {
+  const R = RANGES[range], svg = $('#chartSvg');
+  // Buckets line up with local clock time (e.g. 3-hour buckets start at midnight).
+  const tz = new Date().getTimezoneOffset() * 60e3, now = Date.now();
+  const end = Math.ceil((now - tz) / R.step) * R.step + tz, start = end - R.n * R.step;
+  const all = [...cards.values()].map(v => v.el._clip);
+  const sig = [range, start, svg.clientWidth, all.length, all.map(c => c.labels ? c.labels.length : 0).join('')].join('|');
+  if (!force && sig === chartSig) return;   // re-rendering under the mouse would flicker the tooltip
+  chartSig = sig;
+
+  buckets = Array.from({ length: R.n }, (_, i) => ({ t: start + i * R.step, sec: 0, clips: [], groups: {} }));
+  const totals = {};
+  for (const c of all) {
+    const i = Math.floor((clipDate(c) - start) / R.step);
+    if (i < 0 || i >= R.n) continue;
+    const b = buckets[i], g = clipGroup(c), d = c.duration || 0;
+    b.sec += d; b.clips.push(c);
+    b.groups[g] = (b.groups[g] || 0) + d;
+    totals[g] = (totals[g] || 0) + d;
+  }
+  const order = Object.keys(GROUP_COLORS).filter(g => totals[g]);
+
+  const W = svg.clientWidth || 600, H = 150, L = 34, B = 18, T = 6, ph = H - B - T;
+  const bw = (W - L) / R.n;
+  const tick = bw * R.tick < 56 ? R.tick * 2 : R.tick;   // fewer labels on narrow screens
+  const max = Math.max(60, ...buckets.map(b => b.sec));
+  const yMax = Math.ceil(max / 60 / (max > 600 ? 5 : 1)) * (max > 600 ? 5 : 1) * 60;   // whole minutes
+  const y = sec => T + ph - sec / yMax * ph;
+  let out = '';
+  for (const f of [0, .5, 1]) {
+    out += `<line class="grid" x1="${L}" x2="${W}" y1="${y(yMax * f)}" y2="${y(yMax * f)}"/>`;
+    out += `<text x="${L - 6}" y="${y(yMax * f) + 4}" text-anchor="end">${f ? `${+(yMax * f / 60).toFixed(1)}m` : '0'}</text>`;
+  }
+  buckets.forEach((b, i) => {
+    const x = L + i * bw;
+    let top = T + ph;   // stack upwards; tiny segments get a minimum height so they stay visible
+    for (const g of order) {
+      const v = b.groups[g];
+      if (!v) continue;
+      const h = Math.max(1.5, v / yMax * ph);
+      top -= h;
+      out += `<rect x="${x + bw * .12}" y="${top}" width="${bw * .76}" height="${h}" fill="${GROUP_COLORS[g]}" rx="1"/>`;
+    }
+    const d = new Date(b.t);
+    if ((b.t - tz) % (R.step * tick) === 0 && x + 18 < W) {
+      const lab = range === '7d' ? wdayFmt.format(d) : hourFmt.format(d);
+      out += `<line class="grid" x1="${x}" x2="${x}" y1="${T + ph}" y2="${T + ph + 4}"/>`;
+      out += `<text x="${x}" y="${H - 3}" text-anchor="middle">${lab}</text>`;
+    }
+    out += `<rect class="hit" data-i="${i}" x="${x}" y="${T}" width="${bw}" height="${ph}"/>`;
+  });
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = out;
+
+  const n = buckets.reduce((s, b) => s + b.clips.length, 0);
+  $('#chartSum').textContent = n ? `${n} clip${n === 1 ? '' : 's'} · ${fmtMin(buckets.reduce((s, b) => s + b.sec, 0))}` : 'nothing heard';
+  $('#legend').innerHTML = order.sort((a, b) => totals[b] - totals[a])
+    .map(g => `<span><i class="sw" style="background:${GROUP_COLORS[g]}"></i>${esc(g)} ${fmtMin(totals[g])}</span>`).join('');
+}
+
+function bucketAt(e) { const i = e.target.dataset && e.target.dataset.i; return i === undefined ? null : buckets[+i]; }
+$('#chartSvg').onmousemove = e => {
+  const b = bucketAt(e), tip = $('#tip');
+  if (!b || !b.clips.length) { tip.hidden = true; return; }
+  const rows = Object.entries(b.groups).sort((p, q) => q[1] - p[1]).map(([g, v]) => {
+    const n = b.clips.filter(c => clipGroup(c) === g).length;
+    return `<div><i class="sw" style="background:${GROUP_COLORS[g]}"></i>${esc(g)}<span class="v">${n} · ${fmtMin(v)}</span></div>`;
+  }).join('');
+  const speech = b.clips.filter(c => c.speech && c.kept !== false).length;
+  tip.innerHTML = `<div class="t">${tipFmt.format(new Date(b.t))} – ${hourFmt.format(new Date(b.t + RANGES[range].step))}</div>${rows}
+    <div style="margin-top:4px;color:var(--muted)">${speech ? `${speech} with speech · ` : ''}click to jump to clips</div>`;
+  tip.hidden = false;
+  const box = $('#chart').getBoundingClientRect();
+  const x = Math.min(e.clientX - box.left + 12, box.width - tip.offsetWidth - 4);
+  tip.style.left = `${Math.max(4, x)}px`;
+  tip.style.top = `${e.clientY - box.top + 14}px`;
+};
+$('#chartSvg').onmouseleave = () => { $('#tip').hidden = true; };
+$('#chartSvg').onclick = e => {
+  const b = bucketAt(e);
+  if (!b || !b.clips.length) return;
+  // Newest clip in the bucket that is (or can be made) visible.
+  const ids = b.clips.map(c => c.id).reverse();
+  let el = ids.map(id => cards.get(id).el).find(el => el.offsetParent !== null);
+  if (!el) {
+    $('#q').value = ''; $('#q').oninput();
+    if (!$('#showNoise').checked) { $('#showNoise').checked = true; $('#showNoise').onchange({ target: $('#showNoise') }); }
+    el = cards.get(ids[0]).el;
+  }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1600);
+};
+$('#range').onclick = e => {
+  const r = e.target.dataset.r;
+  if (!r) return;
+  range = r;
+  for (const b of $('#range').querySelectorAll('button')) b.classList.toggle('on', b.dataset.r === r);
+  $('#tip').hidden = true;
+  drawChart(true);
+};
+window.addEventListener('resize', () => drawChart());
+fetch('/api/sounds').then(r => r.json()).then(r => {
+  labelGroup = {};
+  for (const [g, labels] of Object.entries(r.groups)) for (const l of labels) labelGroup[l] = g;
+  drawChart(true);
+}).catch(() => {});
 
 pollClips();
 pollState();

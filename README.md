@@ -20,6 +20,9 @@ chronological timeline you can search and play back. Nothing leaves the machine.
   `127.0.0.1:8770`.
 - **`dashboard.html`**: newest-first timeline grouped by day, with audio playback, search, a live input
   meter, pause/resume, delete, and a toggle for non-speech clips (e.g. `[BLANK_AUDIO]`, `(music)`).
+  A **Sounds over time** chart above it shows minutes recorded over the last 3 hours, 24 hours or
+  7 days, coloured by the kind of sound (the group of each clip's strongest label); click a bar to jump
+  to those clips.
 
 ## Requirements
 

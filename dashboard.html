@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mic Log</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --text: #1d1d1b; --muted: #75736d; --line: #e4e2dc;
+    --accent: #2f6f5e; --rec: #d23f31; --warn: #b7791f; --meter: #e9e7e1;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --surface: #1f1f1d; --text: #ecebe6; --muted: #9a988f; --line: #2f2e2b;
+      --accent: #6cc1a6; --rec: #ff6b5c; --warn: #e3b04b; --meter: #2c2b28; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 16px; }
+  .bar { display: flex; align-items: center; gap: 14px; padding: 14px 0 10px; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500;
+    padding: 3px 10px; border-radius: 99px; background: var(--surface); border: 1px solid var(--line);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.listening .dot { background: var(--accent); }
+  .pill.recording .dot { background: var(--rec); animation: pulse 1s infinite; }
+  .pill.paused .dot { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .spacer { flex: 1; }
+  button {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--surface); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 7px; padding: 4px 11px;
+  }
+  button:hover { border-color: var(--muted); }
+  .meter { position: relative; height: 6px; background: var(--meter); border-radius: 3px; overflow: hidden; }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width .1s linear; }
+  .meter.hot .fill { background: var(--rec); }
+  .meter .thr { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); opacity: .45; }
+  .tools { display: flex; gap: 12px; align-items: center; padding: 10px 0 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  input[type=search] {
+    flex: 1; min-width: 160px; font: inherit; font-size: 14px; color: var(--text); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px;
+  }
+  label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
+  main { padding: 8px 0 60px; }
+  .day { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 22px 0 8px; }
+  .clip {
+    display: grid; grid-template-columns: 74px 1fr; gap: 4px 14px; padding: 12px 14px; margin-bottom: 8px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  }
+  .clip.new { animation: appear .5s ease-out; }
+  @keyframes appear { from { opacity: 0; transform: translateY(-6px); } }
+  .time { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 14px; }
+  .dur { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .clip.nospeech .text, .clip.transcribing .text { color: var(--muted); font-style: italic; }
+  .clip.error .text { color: var(--rec); }
+  .row { grid-column: 2; display: flex; align-items: center; gap: 10px; }
+  audio { height: 32px; flex: 1; min-width: 0; }
+  .del { border: none; background: none; color: var(--muted); padding: 4px 6px; }
+  .del:hover { color: var(--rec); }
+  .hide-nospeech .clip.nospeech, .clip.filtered { display: none; }
+  mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: 2px; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; }
+  @media (max-width: 520px) {
+    .clip { grid-template-columns: 1fr; }
+    .row { grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="bar">
+      <h1>Mic Log</h1>
+      <span id="status" class="pill"><span class="dot"></span><span id="statusText">Connecting…</span></span>
+      <span class="spacer"></span>
+      <span id="queue" class="dur"></span>
+      <button id="pause">Pause</button>
+    </div>
+    <div class="meter" id="meter" title="Input level (marker = trigger threshold)"><div class="fill"></div><div class="thr"></div></div>
+    <div class="tools">
+      <input type="search" id="q" placeholder="Search transcripts">
+      <label><input type="checkbox" id="showNoise"> Show non-speech</label>
+      <span id="count"></span>
+    </div>
+  </div>
+</header>
+<main class="wrap">
+  <div id="list" class="hide-nospeech"></div>
+  <div id="empty" class="empty">Nothing heard yet. Say something.</div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const list = $('#list');
+const cards = new Map();      // id -> { el, sig }
+let topDay = null;
+let paused = false;
+
+const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+const dayKey = d => d.toDateString();
+const clipDate = c => c.start ? new Date(c.start) : new Date();
+
+function dayLabel(d) {
+  const today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
+  if (dayKey(d) === dayKey(today)) return 'Today';
+  if (dayKey(d) === dayKey(y)) return 'Yesterday';
+  return dayFmt.format(d);
+}
+
+function fmtDur(s) {
+  if (s == null) return '';
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
+function esc(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function textHtml(c) {
+  if (c.status === 'transcribing' || !c.status) return 'Transcribing…';
+  const t = c.text || '';
+  if (c.status === 'error') return esc('Error: ' + t);
+  if (!c.speech) return esc(t || '(no speech detected)');
+  const q = $('#q').value.trim();
+  if (!q) return esc(t);
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  return esc(t).replace(re, m => `<mark>${m}</mark>`);
+}
+
+function classes(c) {
+  const k = ['clip'];
+  if (c.status === 'transcribing' || !c.status) k.push('transcribing');
+  else if (c.status === 'error') k.push('error');
+  else if (!c.speech) k.push('nospeech');
+  return k.join(' ');
+}
+
+function buildCard(c) {
+  const el = document.createElement('div');
+  el.dataset.id = c.id;
+  el.dataset.day = dayKey(clipDate(c));
+  el.innerHTML = `
+    <div><div class="time">${timeFmt.format(clipDate(c))}</div><div class="dur">${fmtDur(c.duration)}</div></div>
+    <div class="text"></div>
+    <div class="row"></div>`;
+  updateCard(el, c);
+  return el;
+}
+
+function updateCard(el, c) {
+  const keep = el.classList.contains('new');
+  el.className = classes(c) + (keep ? ' new' : '');
+  el.querySelector('.text').innerHTML = textHtml(c);
+  el._clip = c;
+  const row = el.querySelector('.row');
+  if (c.status === 'done' && !row.querySelector('audio')) {
+    row.innerHTML = `<audio controls preload="none" src="/audio/${c.id}.wav"></audio>
+      <button class="del" title="Delete clip">Delete</button>`;
+    row.querySelector('.del').onclick = () => del(c.id);
+  }
+  applyFilter(el);
+}
+
+function dayHeader(d) {
+  const h = document.createElement('div');
+  h.className = 'day';
+  h.dataset.day = dayKey(d);
+  h.textContent = dayLabel(d);
+  return h;
+}
+
+function render(clips) {
+  // clips arrive oldest first. Cards are only ever inserted at the top (newest),
+  // never moved, so audio that is playing isn't interrupted.
+  const initial = cards.size === 0;
+  for (const c of clips) {
+    const sig = c.status + '|' + (c.text || '');
+    const have = cards.get(c.id);
+    if (have) {
+      if (have.sig !== sig) { have.sig = sig; updateCard(have.el, c); }
+      continue;
+    }
+    const el = buildCard(c);
+    if (!initial) el.classList.add('new');
+    const d = clipDate(c);
+    if (dayKey(d) !== topDay) {
+      list.prepend(el);
+      list.prepend(dayHeader(d));
+      topDay = dayKey(d);
+    } else {
+      list.firstElementChild.after(el);   // right under today's header
+    }
+    cards.set(c.id, { el, sig });
+  }
+  updateCount();
+}
+
+function applyFilter(el) {
+  const q = $('#q').value.trim().toLowerCase();
+  const t = (el._clip.text || '').toLowerCase();
+  el.classList.toggle('filtered', !!q && !t.includes(q));
+}
+
+function updateCount() {
+  const all = [...cards.values()].map(v => v.el._clip);
+  const speech = all.filter(c => c.speech).length;
+  $('#count').textContent = `${speech} with speech · ${all.length} total`;
+  const anyVisible = [...cards.values()].some(v => v.el.offsetParent !== null);
+  $('#empty').style.display = anyVisible ? 'none' : '';
+  $('#empty').textContent = cards.size ? 'No clips match.' : 'Nothing heard yet. Say something.';
+  // Hide day headers with no visible clips under them.
+  for (const h of list.querySelectorAll('.day')) {
+    let n = h.nextElementSibling, vis = false;
+    while (n && !n.classList.contains('day')) { if (n.offsetParent !== null) { vis = true; break; } n = n.nextElementSibling; }
+    h.style.display = vis ? '' : 'none';
+  }
+}
+
+async function del(id) {
+  if (!confirm('Delete this clip and its recording?')) return;
+  await fetch(`/api/clips/${id}`, { method: 'DELETE' });
+  const c = cards.get(id);
+  if (c) { c.el.remove(); cards.delete(id); }
+  updateCount();
+}
+
+async function pollClips() {
+  try { render(await (await fetch('/api/clips')).json()); } catch {}
+  setTimeout(pollClips, 1500);
+}
+
+async function pollState() {
+  let s = null;
+  try { s = await (await fetch('/api/state')).json(); } catch {}
+  const pill = $('#status'), txt = $('#statusText'), meter = $('#meter');
+  pill.className = 'pill';
+  if (!s) { txt.textContent = 'Server offline'; }
+  else {
+    paused = s.paused;
+    $('#pause').textContent = paused ? 'Resume' : 'Pause';
+    if (!s.online) txt.textContent = 'Recorder offline';
+    else if (s.paused) { pill.classList.add('paused'); txt.textContent = 'Paused'; }
+    else if (s.recording) { pill.classList.add('recording'); txt.textContent = 'Recording'; }
+    else { pill.classList.add('listening'); txt.textContent = 'Listening'; }
+    $('#queue').textContent = s.queue ? `${s.queue} waiting for transcription` : '';
+    const pct = db => Math.max(0, Math.min(100, (db + 80) / 80 * 100));   // -80..0 dBFS
+    meter.querySelector('.fill').style.width = s.online ? pct(s.level_db) + '%' : '0';
+    meter.querySelector('.thr').style.left = pct(s.threshold_db) + '%';
+    meter.classList.toggle('hot', !!s.recording);
+  }
+  setTimeout(pollState, 200);
+}
+
+$('#pause').onclick = async () => {
+  await fetch(paused ? '/api/resume' : '/api/pause', { method: 'POST' });
+};
+$('#showNoise').onchange = e => { list.classList.toggle('hide-nospeech', !e.target.checked); updateCount(); };
+$('#q').oninput = () => {
+  for (const { el } of cards.values()) { el.querySelector('.text').innerHTML = textHtml(el._clip); applyFilter(el); }
+  updateCount();
+};
+
+pollClips();
+pollState();
+</script>
+</body>
+</html>

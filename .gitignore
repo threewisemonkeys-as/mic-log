@@ -1,0 +1,13 @@
+# Personal data and machine-specific output
+recordings/
+logs/
+build.log
+
+# Downloaded / built dependencies
+models/
+whisper.cpp/
+
+# Compiled binaries
+vad
+rec
+.DS_Store

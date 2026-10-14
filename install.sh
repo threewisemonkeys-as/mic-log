@@ -22,11 +22,30 @@ fi
 
 # The embedded Info.plist + stable signing identifier let macOS show a
 # microphone permission prompt for the launchd-run recorder.
-# Note: rebuilding changes the ad-hoc signature, so macOS will ask again.
+# macOS remembers the mic permission per signature. Signed with a certificate
+# (SIGN_ID, see README), the permission survives rebuilds; ad-hoc signed, every
+# rebuild looks like a new app and macOS asks again.
+SIGN_ID=${SIGN_ID:-Mic Recorder}
 if [[ ! -x vad || vad.swift -nt vad ]]; then
   echo "building recorder..."
-  swiftc -O vad.swift -o vad -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist
-  codesign -f -s - -i com.mic.vad vad
+  # Built and signed under a temporary name, so a failed build or signature leaves the old recorder in place.
+  swiftc -O vad.swift -o vad.new -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist
+  if security find-identity -p codesigning | grep -qF "\"$SIGN_ID\""; then
+    codesign -f -s "$SIGN_ID" -i com.mic.vad vad.new || {
+      rm -f vad.new
+      echo "signing failed: run ./install.sh from the Terminal app so macOS can ask to use the key" >&2
+      exit 1
+    }
+  else
+    echo "note: no '$SIGN_ID' signing certificate, so macOS will ask for mic access again (see README)"
+    codesign -f -s - -i com.mic.vad vad.new
+  fi
+  mv vad.new vad
+fi
+
+if [[ ! -x classify || classify.swift -nt classify ]]; then
+  echo "building sound classifier..."
+  swiftc -O classify.swift -o classify
 fi
 
 mkdir -p logs recordings

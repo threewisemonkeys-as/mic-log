@@ -72,10 +72,36 @@
   .del:hover { color: var(--rec); }
   .hide-nospeech .clip.nospeech, .clip.filtered { display: none; }
   mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: 2px; }
+  .cal {
+    margin: 0 0 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; font-size: 14px;
+  }
+  .cal[hidden] { display: none; }
+  .cal p { margin: 0 0 10px; }
+  .cal .big { font-size: 16px; font-weight: 600; }
+  .cal .hint { color: var(--muted); font-size: 13px; }
+  .cal .warn { color: var(--warn); }
+  .cal .row2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .cal input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+  .cal .val { font-variant-numeric: tabular-nums; min-width: 9ch; }
+  .heard { grid-column: 2; font-size: 12px; color: var(--muted); }
+  .snd { max-height: 55vh; overflow: auto; margin: 0 0 10px; border-top: 1px solid var(--line); }
+  .snd details { border-bottom: 1px solid var(--line); padding: 6px 0; }
+  .snd summary { cursor: pointer; display: flex; gap: 8px; align-items: center; list-style: none; }
+  .snd summary::-webkit-details-marker { display: none; }
+  .snd summary::before { content: '▸'; color: var(--muted); width: 1ch; }
+  .snd details[open] summary::before { content: '▾'; }
+  .snd summary .n { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .snd .labels { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; padding: 6px 0 4px 3ch; }
+  .snd .labels label { font-size: 13px; }
+  .snd .labels .c { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .snd .labels label.unheard { color: var(--muted); }
+  .hide-unheard .snd .labels label.unheard { display: none; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
   .empty { text-align: center; color: var(--muted); padding: 60px 0; }
   @media (max-width: 520px) {
     .clip { grid-template-columns: 1fr; }
-    .row { grid-column: 1; }
+    .row, .heard { grid-column: 1; }
   }
 </style>
 </head>
@@ -87,12 +113,42 @@
       <span id="status" class="pill"><span class="dot"></span><span id="statusText">Connecting…</span></span>
       <span class="spacer"></span>
       <span id="queue" class="dur"></span>
+      <button id="sndBtn">Sounds</button>
+      <button id="calBtn">Calibrate</button>
       <button id="pause">Pause</button>
     </div>
     <div class="meter" id="meter" title="Input level (marker = trigger threshold)"><div class="fill"></div><div class="thr"></div></div>
+    <div class="cal" id="cal" hidden>
+      <div id="calStep"></div>
+      <div class="row2">
+        <span class="hint">Sensitivity</span>
+        <input type="range" id="margin" min="6" max="40" step="1">
+        <span class="val" id="marginVal"></span>
+        <button id="calStart">Run calibration</button>
+        <button id="calSave" class="primary">Save</button>
+        <button id="calClose">Close</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0">The recorder starts a clip when speech-band sound stays this many dB above the room's noise floor.
+        Higher = picks up less. The meter marker shows the resulting threshold.</p>
+    </div>
+    <div class="cal hide-unheard" id="sndPanel" hidden>
+      <p>Clips are kept and transcribed only when the on-device sound classifier hears one of the ticked sounds.
+        Everything else is still recorded but hidden (see “Show hidden clips”) and not transcribed.
+        Numbers are how many of your clips contain that sound.</p>
+      <div class="snd" id="snd"></div>
+      <div class="row2">
+        <label><input type="checkbox" id="sndAll"> Show sounds not heard yet</label>
+        <span class="hint">Min. confidence</span>
+        <select id="sndConf"><option value="0.3">30%</option><option value="0.5">50%</option><option value="0.7">70%</option></select>
+        <span class="spacer"></span>
+        <button id="sndSave" class="primary">Save</button>
+        <button id="sndClose">Close</button>
+      </div>
+      <p class="hint" id="sndMsg" style="margin:8px 0 0"></p>
+    </div>
     <div class="tools">
       <input type="search" id="q" placeholder="Search transcripts">
-      <label><input type="checkbox" id="showNoise"> Show non-speech</label>
+      <label><input type="checkbox" id="showNoise"> Show hidden clips</label>
       <span id="count"></span>
     </div>
   </div>
@@ -127,8 +183,13 @@ function fmtDur(s) {
 
 function esc(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+const pretty = l => l.replace(/_/g, ' ');
+const heardText = c => (c.labels || []).filter(([, p]) => p >= 0.3).slice(0, 4)
+  .map(([l, p]) => `${pretty(l)} ${Math.round(p * 100)}%`).join(' · ');
+
 function textHtml(c) {
   if (c.status === 'transcribing' || !c.status) return 'Transcribing…';
+  if (c.kept === false && c.text == null) return 'Not transcribed: no kept sounds heard';
   const t = c.text || '';
   if (c.status === 'error') return esc('Error: ' + t);
   if (!c.speech) return esc(t || '(no speech detected)');
@@ -142,7 +203,7 @@ function classes(c) {
   const k = ['clip'];
   if (c.status === 'transcribing' || !c.status) k.push('transcribing');
   else if (c.status === 'error') k.push('error');
-  else if (!c.speech) k.push('nospeech');
+  else if (!c.speech || c.kept === false) k.push('nospeech');
   return k.join(' ');
 }
 
@@ -153,6 +214,7 @@ function buildCard(c) {
   el.innerHTML = `
     <div><div class="time">${timeFmt.format(clipDate(c))}</div><div class="dur">${fmtDur(c.duration)}</div></div>
     <div class="text"></div>
+    <div class="heard"></div>
     <div class="row"></div>`;
   updateCard(el, c);
   return el;
@@ -162,6 +224,8 @@ function updateCard(el, c) {
   const keep = el.classList.contains('new');
   el.className = classes(c) + (keep ? ' new' : '');
   el.querySelector('.text').innerHTML = textHtml(c);
+  const h = heardText(c);
+  el.querySelector('.heard').textContent = h ? 'Heard: ' + h : '';
   el._clip = c;
   const row = el.querySelector('.row');
   if (c.status === 'done' && !row.querySelector('audio')) {
@@ -185,7 +249,7 @@ function render(clips) {
   // never moved, so audio that is playing isn't interrupted.
   const initial = cards.size === 0;
   for (const c of clips) {
-    const sig = c.status + '|' + (c.text || '');
+    const sig = [c.status, c.text, c.kept, (c.labels || []).length].join('|');
     const have = cards.get(c.id);
     if (have) {
       if (have.sig !== sig) { have.sig = sig; updateCard(have.el, c); }
@@ -214,7 +278,7 @@ function applyFilter(el) {
 
 function updateCount() {
   const all = [...cards.values()].map(v => v.el._clip);
-  const speech = all.filter(c => c.speech).length;
+  const speech = all.filter(c => c.speech && c.kept !== false).length;
   $('#count').textContent = `${speech} with speech · ${all.length} total`;
   const anyVisible = [...cards.values()].some(v => v.el.offsetParent !== null);
   $('#empty').style.display = anyVisible ? 'none' : '';
@@ -258,10 +322,141 @@ async function pollState() {
     meter.querySelector('.fill').style.width = s.online ? pct(s.level_db) + '%' : '0';
     meter.querySelector('.thr').style.left = pct(s.threshold_db) + '%';
     meter.classList.toggle('hot', !!s.recording);
+    lastState = s;
+    if (calOpen && !calBusy) {
+      // Preview the slider's threshold on the meter while the panel is open.
+      meter.querySelector('.thr').style.left = pct(s.floor_db + +$('#margin').value) + '%';
+    }
   }
   setTimeout(pollState, 200);
 }
 
+// Calibration: sample the live level while the room is quiet, then while you speak,
+// and put the trigger threshold between the two.
+let lastState = null, calOpen = false, calBusy = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const pctile = (xs, p) => { const a = [...xs].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
+const showMargin = () => { $('#marginVal').textContent = `${$('#margin').value} dB`; };
+const step = html => { $('#calStep').innerHTML = html; };
+
+async function sample(seconds, label) {
+  const xs = [], end = Date.now() + seconds * 1000;
+  while (Date.now() < end) {
+    try { const s = await (await fetch('/api/state')).json(); if (s.online) xs.push(s.level_db); } catch {}
+    step(`<p class="big">${label}</p><p class="hint">${Math.ceil((end - Date.now()) / 1000)}s…</p>`);
+    await sleep(100);
+  }
+  return xs;
+}
+
+async function calibrate() {
+  if (!lastState || !lastState.online) { step('<p class="warn">The recorder is offline, so it can’t calibrate.</p>'); return; }
+  calBusy = true;
+  $('#calStart').disabled = $('#calSave').disabled = true;
+  const wasPaused = paused;
+  if (!wasPaused) await fetch('/api/pause', { method: 'POST' });   // don't record the calibration
+  try {
+    step('<p class="big">Get ready: stay quiet, leave the room as it normally is.</p>');
+    await sleep(2000);
+    const quiet = await sample(6, 'Stay quiet: measuring background noise');
+    step('<p class="big">Now talk normally from where you usually are.</p>');
+    await sleep(1500);
+    const talk = await sample(8, 'Keep talking normally (read anything aloud)');
+    const floor = pctile(quiet, 0.1), noise = pctile(quiet, 0.95), voice = pctile(talk, 0.6);
+    const gap = voice - noise;
+    let margin = Math.round((noise + voice) / 2 - floor);
+    margin = Math.max(6, Math.min(40, margin));
+    $('#margin').value = margin; showMargin();
+    step(`<p>Background: ${noise.toFixed(0)} dB · Your voice: ${voice.toFixed(0)} dB · Difference: <b>${gap.toFixed(0)} dB</b></p>` +
+      (gap < 8
+        ? `<p class="warn">Your voice is barely louder than the background, so clips will be unreliable. Move the mic closer,
+             or raise the input volume (System Settings → Sound → Input), then run calibration again.</p>`
+        : `<p>Suggested sensitivity: <b>${margin} dB</b>. Press Save to apply it.</p>`));
+  } finally {
+    if (!wasPaused) await fetch('/api/resume', { method: 'POST' });
+    calBusy = false;
+    $('#calStart').disabled = $('#calSave').disabled = false;
+  }
+}
+
+$('#calBtn').onclick = () => {
+  calOpen = $('#cal').hidden;
+  $('#cal').hidden = !calOpen;
+  if (calOpen) {
+    $('#margin').value = Math.round(lastState?.margin_db ?? 12); showMargin();
+    step('<p>Run calibration to measure your room and voice, or set the sensitivity by hand.</p>');
+  }
+};
+$('#calClose').onclick = () => { calOpen = false; $('#cal').hidden = true; };
+$('#margin').oninput = showMargin;
+$('#calStart').onclick = calibrate;
+$('#calSave').onclick = async () => {
+  const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ margin_db: +$('#margin').value }) });
+  step(r.ok ? `<p>Saved. Clips now start ${$('#margin').value} dB above the noise floor.</p>`
+            : '<p class="warn">Could not save the setting.</p>');
+};
+// Sounds panel: choose which classifier labels make a clip worth keeping.
+let sounds = null;
+function renderSounds() {
+  const keep = new Set(sounds.keep);
+  const box = $('#snd');
+  const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.g));
+  box.innerHTML = '';
+  for (const [group, labels] of Object.entries(sounds.groups)) {
+    const heard = labels.filter(l => sounds.counts[l]).length;
+    const clipsN = labels.reduce((n, l) => n + (sounds.counts[l] || 0), 0);
+    const sorted = [...labels].sort((a, b) => (sounds.counts[b] || 0) - (sounds.counts[a] || 0) || a.localeCompare(b));
+    const d = document.createElement('details');
+    d.dataset.g = group;
+    if (open.has(group)) d.open = true;
+    d.innerHTML = `<summary><input type="checkbox" class="grp"> <b>${esc(group)}</b>
+        <span class="n">${heard ? `${heard} heard` : 'none heard'} · ${labels.length} sounds</span></summary>
+      <div class="labels">${sorted.map(l => `<label class="${sounds.counts[l] ? '' : 'unheard'}">
+        <input type="checkbox" value="${l}" ${keep.has(l) ? 'checked' : ''}> ${esc(pretty(l))}
+        <span class="c">${sounds.counts[l] || ''}</span></label>`).join('')}</div>`;
+    const grp = d.querySelector('.grp'), boxes = [...d.querySelectorAll('.labels input')];
+    const sync = () => {
+      const n = boxes.filter(b => b.checked).length;
+      grp.checked = n === boxes.length; grp.indeterminate = n > 0 && n < boxes.length;
+    };
+    grp.onclick = e => e.stopPropagation();
+    grp.onchange = () => { boxes.forEach(b => b.checked = grp.checked); };
+    boxes.forEach(b => b.onchange = sync);
+    sync();
+    box.append(d);
+  }
+}
+$('#sndBtn').onclick = async () => {
+  const panel = $('#sndPanel');
+  panel.hidden = !panel.hidden;
+  if (panel.hidden) return;
+  sounds = await (await fetch('/api/sounds')).json();
+  $('#sndConf').value = String(sounds.min_confidence);
+  $('#sndMsg').textContent = '';
+  renderSounds();
+};
+$('#sndClose').onclick = () => { $('#sndPanel').hidden = true; };
+$('#sndAll').onchange = e => $('#sndPanel').classList.toggle('hide-unheard', !e.target.checked);
+$('#sndConf').onchange = async () => {   // counts depend on the confidence cut-off
+  const keep = [...$('#snd').querySelectorAll('.labels input:checked')].map(b => b.value);
+  const r = await (await fetch('/api/sounds')).json();
+  sounds = { ...r, keep, min_confidence: +$('#sndConf').value };
+  // recount locally at the new cut-off from the clips we already have
+  const counts = {};
+  for (const { el } of cards.values())
+    for (const [l, p] of el._clip.labels || []) if (p >= sounds.min_confidence) counts[l] = (counts[l] || 0) + 1;
+  sounds.counts = counts;
+  renderSounds();
+};
+$('#sndSave').onclick = async () => {
+  const keep = [...$('#snd').querySelectorAll('.labels input:checked')].map(b => b.value);
+  const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep, min_confidence: +$('#sndConf').value }) });
+  $('#sndMsg').textContent = r.ok
+    ? `Saved: keeping clips with ${keep.length} sound${keep.length === 1 ? '' : 's'}. Newly kept clips will be transcribed in the background.`
+    : 'Could not save.';
+};
 $('#pause').onclick = async () => {
   await fetch(paused ? '/api/resume' : '/api/pause', { method: 'POST' });
 };

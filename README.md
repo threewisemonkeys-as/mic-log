@@ -8,11 +8,15 @@ chronological timeline you can search and play back. Nothing leaves the machine.
 ## How it works
 
 - **`vad`** (`vad.swift`): listens to the default input with AVAudioEngine and tracks the
-  room's noise floor. Sound more than 12 dB above it starts a clip, with 0.5 s of pre-roll;
-  1.5 s of silence ends it. Finished clips go to `recordings/pending/`, and a live level/status
+  room's noise floor (10th percentile of the last 20 s). Levels are measured in the speech band
+  (250 Hz–4 kHz), so rumble, thumps and fans don't count. Sound that stays 12 dB (configurable)
+  above the floor for 0.15 s starts a clip, with 0.5 s of pre-roll; 1.5 s of silence ends it. Finished clips go to `recordings/pending/`, and a live level/status
   file is written to `recordings/state.json`.
-- **`server.py`**: standard-library Python. It converts each pending clip to 16 kHz WAV, transcribes
-  it with `whisper-cli` (`base.en` model), and serves the dashboard and a small JSON API on
+- **`classify`** (`classify.swift`): labels a clip with Apple's built-in on-device sound classifier
+  (SoundAnalysis, ~300 sounds such as speech, music, dog bark, door). Labels are grouped in `sound_groups.json`.
+- **`server.py`**: standard-library Python. It converts each pending clip to 16 kHz WAV and classifies it.
+  Clips where a sound on your keep list is heard (default: speech-type sounds, ≥ 50% confidence) are
+  transcribed with `whisper-cli` (`base.en` model); the rest are kept but hidden and not transcribed. It serves the dashboard and a small JSON API on
   `127.0.0.1:8770`.
 - **`dashboard.html`**: newest-first timeline grouped by day, with audio playback, search, a live input
   meter, pause/resume, delete, and a toggle for non-speech clips (e.g. `[BLANK_AUDIO]`, `(music)`).
@@ -48,9 +52,30 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8770
 
 ## Tuning
 
-Constants at the top of `vad.swift`: `marginDb` (sensitivity), `hangSec` (silence before a clip ends),
-`preRollSec`, `maxSec`, `minVoicedSec`. Rebuild with `./install.sh`; macOS will ask for mic permission
-again, because the binary's ad-hoc signature changes.
+Use **Calibrate** on the dashboard: it measures a few seconds of background, then a few seconds of
+you talking, and suggests a sensitivity between them (or set it by hand with the slider). It's saved
+to `recordings/config.json` and the recorder applies it live, with no rebuild.
+
+Use **Sounds** to choose which sounds make a clip worth keeping. It lists every category the classifier
+knows, with how many of your clips contain each one. Changes apply to existing clips too: newly kept
+clips are transcribed in the background.
+
+Other constants at the top of `vad.swift`: `hangSec` (silence before a clip ends), `onsetSec`,
+`preRollSec`, `maxSec`, `minVoicedSec`. Rebuild with `./install.sh`.
+
+### Keeping the mic permission across rebuilds
+
+macOS remembers the microphone permission per code signature. By default the recorder is ad-hoc
+signed, so every rebuild looks like a new app and macOS asks again. To avoid that, create a
+local signing certificate once:
+
+1. Open **Keychain Access → Certificate Assistant → Create a Certificate…**
+2. Name: `Mic Recorder`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing**. Create.
+3. In the **Terminal app** (not over SSH or inside another tool, which can't show the key prompt), run
+   `touch vad.swift && ./install.sh`. If macOS asks whether `codesign` may use the key, choose
+   **Always Allow**. Approve the mic prompt one last time.
+
+`install.sh` signs with that certificate whenever it exists (set `SIGN_ID=...` to use a different name).
 
 ## Extras
 
